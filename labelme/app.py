@@ -1,11 +1,14 @@
 # -*- coding: utf-8 -*-
 
 import functools
+from labelme.widgets import canvas
 import math
 import os
 import os.path as osp
 import re
 import webbrowser
+import pandas as pd
+from PIL.ImageOps import fit, scale
 
 import imgviz
 from qtpy import QtCore
@@ -31,6 +34,7 @@ from labelme.widgets import LabelListWidgetItem
 from labelme.widgets import ToolBar
 from labelme.widgets import UniqueLabelQListWidget
 from labelme.widgets import ZoomWidget
+from labelme.widgets import FovWidget
 
 
 # FIXME
@@ -48,7 +52,7 @@ LABEL_COLORMAP = imgviz.label_colormap(value=200)
 
 class MainWindow(QtWidgets.QMainWindow):
 
-    FIT_WINDOW, FIT_WIDTH, MANUAL_ZOOM = 0, 1, 2
+    FIT_WINDOW, FIT_WIDTH, MANUAL_ZOOM,FIT_FIELD = 0, 1, 2 ,3
 
     def __init__(
         self,
@@ -107,7 +111,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.labelList = LabelListWidget()
         self.lastOpenDir = None
-
+        self.exifdata = None
         self.flag_dock = self.flag_widget = None
         self.flag_dock = QtWidgets.QDockWidget(self.tr("Flags"), self)
         self.flag_dock.setObjectName("Flags")
@@ -163,6 +167,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.file_dock.setWidget(fileListWidget)
 
         self.zoomWidget = ZoomWidget()
+        self.fovWidget = FovWidget()
         self.setAcceptDrops(True)
 
         self.canvas = self.labelList.canvas = Canvas(
@@ -443,6 +448,9 @@ class MainWindow(QtWidgets.QMainWindow):
         )
 
         zoom = QtWidgets.QWidgetAction(self)
+        fov =  QtWidgets.QWidgetAction(self)
+        fov.setDefaultWidget(self.fovWidget)
+        
         zoom.setDefaultWidget(self.zoomWidget)
         self.zoomWidget.setWhatsThis(
             self.tr(
@@ -490,6 +498,42 @@ class MainWindow(QtWidgets.QMainWindow):
             checkable=True,
             enabled=False,
         )
+        fitFOV = action(
+            self.tr("Fit FO&V"),
+            self.setFitFOV,
+            shortcuts["fit_fov"],
+            "fit-fov",
+            self.tr("Zoom set number of views"),
+            checkable=True,
+            enabled=False,
+        )
+        nextFOV = action(
+            self.tr("&Next FOV"),
+            self.nextFOV,
+            shortcuts["next_fov"],
+            "fit-fov",
+            self.tr("Zoom set number of views"),
+            checkable=True,
+            enabled=False,
+        )       
+        prevFOV = action(
+            self.tr("&Prev FOV"),
+            self.prevFOV,
+            shortcuts["prev_fov"],
+            "fit-fov",
+            self.tr("Zoom set number of views"),
+            checkable=True,
+            enabled=False,
+        )       
+        
+        jumpPloygon = action(
+            self.tr("&Jump to Polygon"),
+            self.jumpToPolygon,
+            shortcuts["jump_ploygon"],
+            "Jump",
+            self.tr("Jump to the selected polygon"),
+            enabled=False,
+        )
         fitWidth = action(
             self.tr("Fit &Width"),
             self.setFitWidth,
@@ -510,17 +554,22 @@ class MainWindow(QtWidgets.QMainWindow):
         # Group zoom controls into a list for easier toggling.
         zoomActions = (
             self.zoomWidget,
+            self.fovWidget,
             zoomIn,
             zoomOut,
             zoomOrg,
             fitWindow,
             fitWidth,
+            fitFOV,
+            nextFOV,
+            prevFOV
         )
         self.zoomMode = self.FIT_WINDOW
         fitWindow.setChecked(Qt.Checked)
         self.scalers = {
             self.FIT_WINDOW: self.scaleFitWindow,
             self.FIT_WIDTH: self.scaleFitWidth,
+            self.FIT_FIELD: self.scaleFitFOV,
             # Set to one to scale to 100% when loading files.
             self.MANUAL_ZOOM: lambda: 1,
         }
@@ -533,6 +582,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.tr("Modify the label of the selected polygon"),
             enabled=False,
         )
+
 
         fill_drawing = action(
             self.tr("Fill Drawing Polygon"),
@@ -547,7 +597,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Lavel list context menu.
         labelMenu = QtWidgets.QMenu()
-        utils.addActions(labelMenu, (edit, delete))
+        utils.addActions(labelMenu, (edit, delete,jumpPloygon))
         self.labelList.setContextMenuPolicy(Qt.CustomContextMenu)
         self.labelList.customContextMenuRequested.connect(
             self.popLabelListMenu
@@ -584,6 +634,10 @@ class MainWindow(QtWidgets.QMainWindow):
             zoomOrg=zoomOrg,
             fitWindow=fitWindow,
             fitWidth=fitWidth,
+            fitFOV=fitFOV,
+            nextFOV=nextFOV,
+            prevFOV=prevFOV,
+            jumpPloygon=jumpPloygon,
             brightnessContrast=brightnessContrast,
             zoomActions=zoomActions,
             openNextImg=openNextImg,
@@ -636,6 +690,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.canvas.edgeSelected.connect(self.canvasShapeEdgeSelected)
         self.canvas.vertexSelected.connect(self.actions.removePoint.setEnabled)
+        self.labelCoordinates = QtWidgets.QLabel('')
+        self.statusBar().addPermanentWidget(self.labelCoordinates)
 
         self.menus = utils.struct(
             file=self.menu(self.tr("&File")),
@@ -678,6 +734,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 None,
                 hideAll,
                 showAll,
+                jumpPloygon,
                 None,
                 zoomIn,
                 zoomOut,
@@ -685,6 +742,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 None,
                 fitWindow,
                 fitWidth,
+                fitFOV,
+                None,
+                nextFOV,
+                prevFOV,
                 None,
                 brightnessContrast,
             ),
@@ -720,6 +781,7 @@ class MainWindow(QtWidgets.QMainWindow):
             brightnessContrast,
             None,
             zoom,
+            fov,
             fitWidth,
         )
 
@@ -783,6 +845,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Callbacks:
         self.zoomWidget.valueChanged.connect(self.paintCanvas)
+        self.fovWidget.valueChanged.connect(self.scaleGotoFOV)
 
         self.populateModeActions()
 
@@ -1262,6 +1325,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def labelSelectionChanged(self):
         if self._noSelectionSlot:
+            self.actions.jumpPloygon.setEnabled(False)
             return
         if self.canvas.editing():
             selected_shapes = []
@@ -1269,8 +1333,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 selected_shapes.append(item.shape())
             if selected_shapes:
                 self.canvas.selectShapes(selected_shapes)
+                self.actions.jumpPloygon.setEnabled(True)
             else:
                 self.canvas.deSelectShape()
+                self.actions.jumpPloygon.setEnabled(False)
 
     def labelItemChanged(self, item):
         shape = item.shape()
@@ -1333,6 +1399,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def setZoom(self, value):
         self.actions.fitWidth.setChecked(False)
         self.actions.fitWindow.setChecked(False)
+        self.actions.fitFOV.setChecked(False)
         self.zoomMode = self.MANUAL_ZOOM
         self.zoomWidget.setValue(value)
         self.zoom_values[self.filename] = (self.zoomMode, value)
@@ -1373,6 +1440,17 @@ class MainWindow(QtWidgets.QMainWindow):
             self.actions.fitWidth.setChecked(False)
         self.zoomMode = self.FIT_WINDOW if value else self.MANUAL_ZOOM
         self.adjustScale()
+        
+    def setFitFOV(self, value=True):
+        if value:
+            self.actions.fitFOV.setChecked(False)
+        self.zoomMode = self.FIT_FIELD if value else self.MANUAL_ZOOM
+        self.adjustScale()        
+    def nextFOV(self):
+        self.fovWidget.setValue(self.fovWidget.value()+1)
+        
+    def prevFOV(self):
+        self.fovWidget.setValue(self.fovWidget.value()-1)
 
     def setFitWidth(self, value=True):
         if value:
@@ -1562,19 +1640,61 @@ class MainWindow(QtWidgets.QMainWindow):
     def scaleFitWindow(self):
         """Figure out the size of the pixmap to fit the main widget."""
         e = 2.0  # So that no scrollbars are generated.
+        w1 = self.centralWidget().width() 
+        h1 = self.centralWidget().height() 
+        a1 = w1 / h1
+        # Calculate a fovnew scale value based on the pixmap's aspect ratio.
+        w2 = self.canvas.pixmap.width() - 0.0
+        h2 = self.canvas.pixmap.height() - 0.0
+        a2 = w2 / h2
+        return w1 / w2 if a2 >= a1 else h1 / h2
+    
+    def scaleFitFOV(self):
+        """Figure out the size of the pixmap to fit the main widget."""
+        e = 2.0  # So that no scrollbars are generated.
+        fov =self._config['default_FOV']
         w1 = self.centralWidget().width() - e
         h1 = self.centralWidget().height() - e
         a1 = w1 / h1
+        w1 = w1 *fov
+        h1 = w1 / a1
         # Calculate a new scale value based on the pixmap's aspect ratio.
         w2 = self.canvas.pixmap.width() - 0.0
         h2 = self.canvas.pixmap.height() - 0.0
         a2 = w2 / h2
         return w1 / w2 if a2 >= a1 else h1 / h2
+    
+    def scaleGotoFOV(self):
+        self.setFitFOV()
+        index = int(self.fovWidget.value())-1
+        """Figure out the size of the pixmap to fit the main widget."""
+        fov =self._config['default_FOV']
+        rows = index // fov
+        cols = index % fov
+        bar = self.scrollBars[Qt.Horizontal]
+        bar.setValue(bar.pageStep()*cols)
+        bar = self.scrollBars[Qt.Vertical]
+        bar.setValue(bar.pageStep()*rows)
 
     def scaleFitWidth(self):
         # The epsilon does not seem to work too well here.
         w = self.centralWidget().width() - 2.0
         return w / self.canvas.pixmap.width()
+
+    def jumpToPolygon(self):
+        if self.canvas.selectedShapes:
+            points =functools.reduce(lambda x, y: x + y.points, self.canvas.selectedShapes, [])
+            x = functools.reduce(lambda x, y: x + y.x(), points, 0) /len(points) 
+            y = functools.reduce(lambda x, y: x + y.y(), points, 0) /len(points) 
+            self.setScroll(
+                Qt.Horizontal,
+                 x*self.canvas.scale-self.centralWidget().width()  /2,
+            )
+            self.setScroll(
+                Qt.Vertical,
+                y*self.canvas.scale -self.centralWidget().height()/2,
+            )
+
 
     def enableSaveImageWithData(self, enabled):
         self._config["store_data"] = enabled
@@ -1637,6 +1757,8 @@ class MainWindow(QtWidgets.QMainWindow):
             filename = self.imageList[currIndex - 1]
             if filename:
                 self.loadFile(filename)
+                if self.FIT_FIELD == self.zoomMode:
+                    self.fovWidget.setValue(1)
 
         self._config["keep_prev"] = keep_prev
 
@@ -1664,6 +1786,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
         if self.filename and load:
             self.loadFile(self.filename)
+            if self.FIT_FIELD == self.zoomMode:
+                self.fovWidget.setValue(1)
 
         self._config["keep_prev"] = keep_prev
 
@@ -1917,6 +2041,7 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self.importDirImages(targetDirPath)
 
+
     @property
     def imageList(self):
         lst = []
@@ -1960,7 +2085,9 @@ class MainWindow(QtWidgets.QMainWindow):
     def importDirImages(self, dirpath, pattern=None, load=True):
         self.actions.openNextImg.setEnabled(True)
         self.actions.openPrevImg.setEnabled(True)
-
+        mergefile = os.path.join(dirpath,'merge.csv')
+        if os.path.exists(mergefile):
+            self.exifdata = pd.read_csv(mergefile)
         if not self.mayContinue() or not dirpath:
             return
 

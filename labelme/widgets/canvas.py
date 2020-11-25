@@ -181,7 +181,9 @@ class Canvas(QtWidgets.QWidget):
 
         self.prevMovePoint = pos
         self.restoreCursor()
-
+        if self.pixmap:
+            self.parent().window().labelCoordinates.setText(
+                'X: %d; Y: %d' % (pos.x(), pos.y()))
         # Polygon drawing.
         if self.drawing():
             self.line.shape_type = self.createMode
@@ -207,6 +209,13 @@ class Canvas(QtWidgets.QWidget):
             if self.createMode in ["polygon", "linestrip"]:
                 self.line[0] = self.current[-1]
                 self.line[1] = pos
+                if  ev.buttons() & QtCore.Qt.LeftButton :
+                    if self.ptDist(self.line[0],self.line[1])>50:
+                        self.current.addPoint(self.line[1])
+                        self.line[0] = self.current[-1]
+                        if int(ev.modifiers()) == QtCore.Qt.ControlModifier:
+                            self.finalise()
+                       # print(f"distance button {self.ptDist(self.line[0],self.line[1])}")
             elif self.createMode == "rectangle":
                 self.line.points = [self.current[0], pos]
                 self.line.close()
@@ -290,6 +299,13 @@ class Canvas(QtWidgets.QWidget):
         self.edgeSelected.emit(self.hEdge is not None, self.hShape)
         self.vertexSelected.emit(self.hVertex is not None)
 
+    def ptDist( self, pt1, pt2 ):
+        # A line between both
+        line = QtCore.QLineF( pt1 , pt2 )
+        # Length
+        lineLength = line.length()
+        return lineLength
+    
     def addPointToEdge(self):
         shape = self.prevhShape
         index = self.prevhEdge

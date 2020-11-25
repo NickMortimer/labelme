@@ -168,7 +168,7 @@ def main():
     app = QtWidgets.QApplication(sys.argv)
     app.setApplicationName(__appname__)
     app.setWindowIcon(newIcon("icon"))
-    app.installTranslator(translator)
+    app.installTranslator(translator) 
     win = MainWindow(
         config=config,
         filename=filename,

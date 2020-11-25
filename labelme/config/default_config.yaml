@@ -18,6 +18,7 @@ default_shape_color: [0, 255, 0]
 shape_color: auto  # null, 'auto', 'manual'
 shift_auto_shape_color: 0
 label_colors: null
+default_FOV: 6
 
 shape:
   # drawing
@@ -83,6 +84,10 @@ shortcuts:
   zoom_to_original: Ctrl+0
   fit_window: Ctrl+F
   fit_width: Ctrl+Shift+F
+  fit_fov: Ctrl+Shift+V
+  next_fov: PgDown
+  prev_fov: PgUp
+  jump_ploygon: Ctrl+Space
 
   create_polygon: Ctrl+N
   create_rectangle: Ctrl+R
