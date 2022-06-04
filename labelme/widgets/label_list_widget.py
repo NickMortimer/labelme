@@ -70,7 +70,7 @@ class HTMLDelegate(QtWidgets.QStyledItemDelegate):
 class LabelListWidgetItem(QtGui.QStandardItem):
     def __init__(self, text=None, shape=None):
         super(LabelListWidgetItem, self).__init__()
-        self.setText(text)
+        self.setText(text or "")
         self.setShape(shape)
 
         self.setCheckable(True)
@@ -179,6 +179,7 @@ class LabelListWidget(QtWidgets.QListView):
             item = self.model().item(row, 0)
             if item.shape() == shape:
                 return item
+        raise ValueError("cannot find shape: {}".format(shape))
 
     def clear(self):
         self.model().clear()
