@@ -7,6 +7,7 @@ import os
 import os.path as osp
 import re
 import webbrowser
+from PIL.ImageOps import fit, scale
 
 import imgviz
 import natsort
