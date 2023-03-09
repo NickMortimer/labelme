@@ -12,7 +12,6 @@
             "type": "python",
             "request": "launch",
             "program": "${workspaceFolder}/labelme/__main__.py",
-            "args" : ["","D:/raw/card0/SURVEY/100_0001"],
             "console": "integratedTerminal"
         }
     ]
