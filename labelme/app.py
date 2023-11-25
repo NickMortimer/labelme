@@ -7,8 +7,10 @@ import math
 import os
 import os.path as osp
 import re
+import json
 import webbrowser
 from PIL.ImageOps import fit, scale
+import numpy as np
 
 import imgviz
 import natsort
@@ -36,6 +38,9 @@ from labelme.widgets import ToolBar
 from labelme.widgets import UniqueLabelQListWidget
 from labelme.widgets import ZoomWidget
 from labelme.widgets import FovWidget
+import pandas as pd
+import cameratransform as ct
+import glob
 
 # FIXME
 # - [medium] Set max zoom value to something big enough for FitWidth/Window
@@ -99,6 +104,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._noSelectionSlot = False
 
         self._copied_shapes = None
+        self.locations = None
 
         # Main widgets and related state.
         self.labelDialog = LabelDialog(
@@ -1617,6 +1623,31 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._config["keep_prev"]:
             prev_shapes = self.canvas.shapes
         self.canvas.loadPixmap(QtGui.QPixmap.fromImage(image))
+        if self.locations is None:
+            self.canvas.cam = None
+        else:
+            item = self.locations.loc[os.path.splitext(os.path.basename(filename))[0]]
+            if 'K1' in item.keys():
+                self.canvas.cam = ct.Camera(ct.RectilinearProjection(focallength_x_px=item.CalibratedFocalLengthX,
+                                                                     focallength_y_px=item.CalibratedFocalLengthY,
+                                                                        center_x_px=item.CalibratedOpticalCenterX,
+                                                                        center_y_px=item.CalibratedOpticalCenterY),
+                                                                        orientation= ct.SpatialOrientation(tilt_deg=item.GimbalPitchDegree,
+                                                                                                        elevation_m=item.AbsoluteAltitude,
+                                                                                                        roll_deg=item.GimbalRollDegree,
+                                                                                                        heading_deg=item.GimbalYawDegree),
+                                                                        lens=ct.BrownLensDistortion(item.K1,item.K2,item.K3))
+            else:
+                self.canvas.cam = ct.Camera(ct.RectilinearProjection(focallength_px=item.CalibratedFocalLength,
+                                                                        center_x_px=item.CalibratedOpticalCenterX,
+                                                                        center_y_px=item.CalibratedOpticalCenterY),
+                                                                        orientation= ct.SpatialOrientation(tilt_deg=item.GimbalPitchDegree,
+                                                                                                        elevation_m=item.AbsoluteAltitude,
+                                                                                                        roll_deg=item.GimbalRollDegree,
+                                                                                                        heading_deg=item.GimbalYawDegree))
+            self.canvas.cam.setGPSpos(item.Latitude, item.Longitude)
+                                            
+            
         flags = {k: False for k in self._config["flags"] or []}
         if self.labelFile:
             self.loadLabels(self.labelFile.shapes)
@@ -1847,6 +1878,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
         if self.filename and load:
             self.loadFile(self.filename)
+
+
             if self.FIT_FIELD == self.zoomMode:
                 self.fovWidget.setValue(1)
 
@@ -2155,15 +2188,75 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.openNextImg()
 
+
+    def processLocations(self):
+        def calcpos(row):
+            if 'CalibratedFocalLengthX' in row.keys():
+                cam = ct.Camera(ct.RectilinearProjection(focallength_x_px=row.CalibratedFocalLengthX,
+                                                        focallength_y_px=row.CalibratedFocalLengthY,
+                                                        center_x_px=row.CalibratedOpticalCenterX,
+                                                        center_y_px=row.CalibratedOpticalCenterY),
+                                                        orientation= ct.SpatialOrientation(tilt_deg=row.GimbalPitchDegree,
+                                                                                        elevation_m=row.RelativeAltitude,
+                                                                                        roll_deg=row.GimbalRollDegree,
+                                                                                        heading_deg=row.GimbalYawDegree),
+                                                        lens=ct.BrownLensDistortion(row.K1,row.K2,row.K3))
+            else:
+                cam = ct.Camera(ct.RectilinearProjection(focallength_px=row.CalibratedFocalLength,
+                                                        center_x_px=row.CalibratedOpticalCenterX,
+                                                        center_y_px=row.CalibratedOpticalCenterY),
+                                                        orientation= ct.SpatialOrientation(tilt_deg=row.GimbalPitchDegree,
+                                                                                            elevation_m=row.AbsoluteAltitude,
+                                                                                            roll_deg=row.GimbalRollDegree,
+                                                                                            heading_deg=row.GimbalYawDegree))
+            cam.setGPSpos(row.Latitude, row.Longitude, row.RelativeAltitude+8)
+            pos =cam.gpsFromImage([row.ScreenX,row.ScreenY])
+            row.LabelLatitude = pos[0]
+            row.LabelLongitude = pos[1]
+            return row
+        self.gpslabels =self.gpslabels.apply(calcpos,axis=1)
+
+
     def importDirImages(self, dirpath, pattern=None, load=True):
+        def loadshapes(file):
+            with open(file, "r") as read_file:
+                data = json.load(read_file)
+            data =pd.DataFrame(data['shapes'])
+            data['FilePath'] =file             
+            return(data)
         self.actions.openNextImg.setEnabled(True)
         self.actions.openPrevImg.setEnabled(True)
-        mergefile = os.path.join(dirpath,'merge.csv')
-        if os.path.exists(mergefile):
-            self.exifdata = pd.read_csv(mergefile)
+        locations = os.path.join(dirpath,'location.csv')
+        labels = os.path.join(dirpath,'labels.csv')
         if not self.mayContinue() or not dirpath:
             return
-
+        if os.path.exists(locations):
+            self.locations = pd.read_csv(locations,index_col='Key')
+        else:
+            self.locations = None
+        if os.path.exists(labels):
+            self.gpslabels = pd.read_csv(labels,index_col='Key')
+        else:
+            jsonfiles = glob.glob(os.path.join(dirpath,'*.json'))
+            if jsonfiles:
+                data = pd.concat([loadshapes(file) for file in jsonfiles])
+                data['FileName'] = data.FilePath.apply(os.path.basename)
+                data['Key'] = data['FileName'].apply(lambda x:os.path.splitext(x)[0])
+                data['Points']= data.points.apply(np.array).apply(lambda x: np.mean(x,axis=0))
+                data[['ScreenX','ScreenY']]=data.points.apply(np.array).apply(lambda x: np.mean(x,axis=0).astype(int)).apply(pd.Series)
+                data = data.drop(columns=['points','group_id', 'shape_type', 'flags','FilePath','Points']).set_index('Key').sort_index().rename(columns={'label':'Label'})
+                data=data.join(self.locations,rsuffix='_Image')
+                data[['LabelLatitude','LabelLongitude']] = 0
+                self.gpslabels = data
+                self.processLocations()
+                self.gpslabels.to_csv(labels)
+            else:
+                data = pd.DataFrame(columns=[ 'FileName', 'ScreenX', 'ScreenY', 'FileName_Image',
+                                              'TimeStamp', 'Longitude', 'Latitude', 'AbsoluteAltitude',
+                                              'CalibratedFocalLength', 'CalibratedOpticalCenterX',
+                                              'CalibratedOpticalCenterY', 'ImageHeight', 'ImageWidth',
+                                              'GimbalPitchDegree', 'GimbalRollDegree', 'GimbalYawDegree',
+                                              'LabelLatitude','LabelLongitude'])
         self.lastOpenDir = dirpath
         self.filename = None
         self.fileListWidget.clear()

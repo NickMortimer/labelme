@@ -5,6 +5,7 @@ from qtpy import QtWidgets
 from labelme import QT5
 from labelme.shape import Shape
 import labelme.utils
+import numpy as np
 
 
 # TODO(unknown):
@@ -91,6 +92,7 @@ class Canvas(QtWidgets.QWidget):
         self.hShapeIsSelected = False
         self._painter = QtGui.QPainter()
         self._cursor = CURSOR_DEFAULT
+        self.cam = None
         # Menus:
         # 0: right-click without selection and dragging of shapes
         # 1: right-click with selection and dragging of shapes
@@ -213,8 +215,13 @@ class Canvas(QtWidgets.QWidget):
         self.prevMovePoint = pos
         self.restoreCursor()
         if self.pixmap:
-            self.parent().window().labelCoordinates.setText(
-                'X: %d; Y: %d' % (pos.x(), pos.y()))
+            if self.cam:
+                earthpos = self.cam.gpsFromImage(np.array([pos.x(), pos.y()]))
+                self.parent().window().labelCoordinates.setText(
+                'X: %d; Y: %d (%f,%f)' % (pos.x(), pos.y(),earthpos[0], earthpos[1]))
+            else:
+                self.parent().window().labelCoordinates.setText(
+                    'X: %d; Y: %d' % (pos.x(), pos.y()))
         # Polygon drawing.
         if self.drawing():
             self.line.shape_type = self.createMode
