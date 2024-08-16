@@ -980,6 +980,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.imagePath = None
         self.imageData = None
         self.labelFile = None
+        self.labelCache = None
         self.otherData = None
         self.canvas.resetState()
 
@@ -1545,6 +1546,86 @@ class MainWindow(QtWidgets.QMainWindow):
     def togglePolygons(self, value):
         for item in self.labelList:
             item.setCheckState(Qt.Checked if value else Qt.Unchecked)
+    def loadgps(self,filename):
+        #find the shape files either side of the current file and load the targets
+        #file name is the json file
+        # Define the regular expression pattern
+        pattern = r'(\d+)\.json$'
+
+        match = re.search(pattern, filename)
+        if match:
+            try:
+                self.gpslabels = []
+                labels = {}
+                digits = match.group(1)
+                for dig in range(int(digits)-3,int(digits)+3):
+                    if (dig>0) and (dig!=int(digits)):
+                        f =glob.glob(f'{osp.dirname(filename)}/*{dig:0{len(digits)}}.json')[0]
+                        key= osp.splitext(osp.basename(f))[0]
+                        labels[key] = LabelFile(f)
+            except LabelFileError as e:
+                self.errorMessage(
+                    self.tr("Error opening file"),
+                    self.tr(
+                        "<p><b>%s</b></p>"
+                        "<p>Make sure <i>%s</i> is a valid label file."
+                    )
+                    % (e, label_file),
+                )
+                self.status(self.tr("Error reading %s") % label_file)
+                return False
+        for key in labels.keys():
+            try:
+                row =self.locations.loc[key]
+                for shape in labels[key].shapes:
+                    if (shape['points']) and (shape["label"]!='done'):
+                        if 'CalibratedFocalLengthX' in row.keys():
+                            cam = ct.Camera(ct.RectilinearProjection(focallength_x_px=row.CalibratedFocalLengthX,
+                                                                    focallength_y_px=row.CalibratedFocalLengthY,
+                                                                    center_x_px=row.CalibratedOpticalCenterX,
+                                                                    center_y_px=row.CalibratedOpticalCenterY),
+                                                                    orientation= ct.SpatialOrientation(tilt_deg=row.GimbalPitchDegree,
+                                                                                                    elevation_m=row.RelativeAltitude,
+                                                                                                    roll_deg=row.GimbalRollDegree,
+                                                                                                    heading_deg=row.GimbalYawDegree),
+                                                                    lens=ct.BrownLensDistortion(row.K1,row.K2,row.K3))
+                        else:
+                            cam = ct.Camera(ct.RectilinearProjection(focallength_px=row.CalibratedFocalLength,
+                                                                    center_x_px=row.CalibratedOpticalCenterX,
+                                                                    center_y_px=row.CalibratedOpticalCenterY),
+                                                                    orientation= ct.SpatialOrientation(tilt_deg=row.GimbalPitchDegree,
+                                                                                                        elevation_m=row.RelativeAltitude,
+                                                                                                        roll_deg=row.GimbalRollDegree,
+                                                                                                        heading_deg=row.GimbalYawDegree))
+                        cam.setGPSpos(row.Latitude, row.Longitude, row.RelativeAltitude)
+                        
+                        pos =cam.gpsFromImage(shape['points'])
+                        if pos[:,0:2].shape[0]==1:
+                            pos =self.canvas.cam.imageFromGPS(pos[:,0:2][0])
+                        else:
+                            pos =self.canvas.cam.imageFromGPS(pos[:,0:2])
+                        shape['points'] = pos
+
+                        label = shape["label"]
+                        points = shape["points"]
+                        shape_type = shape["shape_type"]
+                        flags = shape["flags"]
+                        group_id = shape["group_id"]
+                        other_data = shape["other_data"]
+                        newshape = Shape(
+                            label=label,
+                            shape_type=shape_type,
+                            group_id=group_id,
+                        )
+                        if points.ndim == 1:
+                            points =points[np.newaxis,:]
+                        for point in points:
+                            newshape.addPoint(QtCore.QPointF(point[0], point[1]))
+                        newshape.close()
+                        self.gpslabels.append(newshape)
+            except: 
+                print(f'key not found {key}')           
+            self.canvas.gpslabels = self.gpslabels
 
     def loadFile(self, filename=None):
         """Load the specified file, or the last opened file if None."""
@@ -1633,7 +1714,7 @@ class MainWindow(QtWidgets.QMainWindow):
                                                                         center_x_px=item.CalibratedOpticalCenterX,
                                                                         center_y_px=item.CalibratedOpticalCenterY),
                                                                         orientation= ct.SpatialOrientation(tilt_deg=item.GimbalPitchDegree,
-                                                                                                        elevation_m=item.AbsoluteAltitude,
+                                                                                                        elevation_m=item.RelativeAltitude,
                                                                                                         roll_deg=item.GimbalRollDegree,
                                                                                                         heading_deg=item.GimbalYawDegree),
                                                                         lens=ct.BrownLensDistortion(item.K1,item.K2,item.K3))
@@ -1642,10 +1723,29 @@ class MainWindow(QtWidgets.QMainWindow):
                                                                         center_x_px=item.CalibratedOpticalCenterX,
                                                                         center_y_px=item.CalibratedOpticalCenterY),
                                                                         orientation= ct.SpatialOrientation(tilt_deg=item.GimbalPitchDegree,
-                                                                                                        elevation_m=item.AbsoluteAltitude,
+                                                                                                        elevation_m=item.RelativeAltitude,
                                                                                                         roll_deg=item.GimbalRollDegree,
                                                                                                         heading_deg=item.GimbalYawDegree))
-            self.canvas.cam.setGPSpos(item.Latitude, item.Longitude)
+            self.canvas.cam.setGPSpos(item.Latitude, item.Longitude,item.RelativeAltitude)
+            # self.processLocations()
+            self.canvas.targets = []
+            # for index,row in self.gpslabels[(~self.gpslabels.CurrentScreenX.isna()) & (~self.gpslabels.CurrentScreenY.isna())].iterrows():
+            #     shape = Shape(
+            #         label='*'+row.Label+'*',
+            #         shape_type='circle',
+            #         group_id=-1,
+            #     )
+            #     shape.addPoint(QtCore.QPointF(row.CurrentScreenX, row.CurrentScreenY))
+            #     shape.addPoint(QtCore.QPointF(row.CurrentScreenX+50, row.CurrentScreenY+50))
+            #     shape.close()
+            #     self.canvas.targets.append(shape)
+
+
+            #     # s =Shape(shape_type = "circle")
+            #     # s.addPoint(QtCore.QPoint(int(row.CurrentScreenX), int(row.CurrentScreenY)))
+            #     # s.addPoint(QtCore.QPoint(int(row.CurrentScreenX), int(row.CurrentScreenY+20)))
+            #     # s.
+            
                                             
             
         flags = {k: False for k in self._config["flags"] or []}
@@ -1654,6 +1754,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if self.labelFile.flags is not None:
                 flags.update(self.labelFile.flags)
         self.loadFlags(flags)
+        self.loadgps(self.labelFile.filename)
         if self._config["keep_prev"] and self.noShapes():
             self.loadShapes(prev_shapes, replace=False)
             self.setDirty()
@@ -2191,30 +2292,17 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def processLocations(self):
         def calcpos(row):
-            if 'CalibratedFocalLengthX' in row.keys():
-                cam = ct.Camera(ct.RectilinearProjection(focallength_x_px=row.CalibratedFocalLengthX,
-                                                        focallength_y_px=row.CalibratedFocalLengthY,
-                                                        center_x_px=row.CalibratedOpticalCenterX,
-                                                        center_y_px=row.CalibratedOpticalCenterY),
-                                                        orientation= ct.SpatialOrientation(tilt_deg=row.GimbalPitchDegree,
-                                                                                        elevation_m=row.RelativeAltitude,
-                                                                                        roll_deg=row.GimbalRollDegree,
-                                                                                        heading_deg=row.GimbalYawDegree),
-                                                        lens=ct.BrownLensDistortion(row.K1,row.K2,row.K3))
-            else:
-                cam = ct.Camera(ct.RectilinearProjection(focallength_px=row.CalibratedFocalLength,
-                                                        center_x_px=row.CalibratedOpticalCenterX,
-                                                        center_y_px=row.CalibratedOpticalCenterY),
-                                                        orientation= ct.SpatialOrientation(tilt_deg=row.GimbalPitchDegree,
-                                                                                            elevation_m=row.AbsoluteAltitude,
-                                                                                            roll_deg=row.GimbalRollDegree,
-                                                                                            heading_deg=row.GimbalYawDegree))
-            cam.setGPSpos(row.Latitude, row.Longitude, row.RelativeAltitude+8)
-            pos =cam.gpsFromImage([row.ScreenX,row.ScreenY])
-            row.LabelLatitude = pos[0]
-            row.LabelLongitude = pos[1]
+
+
             return row
-        self.gpslabels =self.gpslabels.apply(calcpos,axis=1)
+
+
+        # self.gpslabels =self.gpslabels.apply(calcpos,axis=1)
+        # self.gpslabels.loc[(self.gpslabels.CurrentScreenX<0) | (self.gpslabels.Label=='done'),'CurrentScreenX'] =np.nan
+        # self.gpslabels.loc[(self.gpslabels.CurrentScreenY<0) | (self.gpslabels.Label=='done'),'CurrentScreenY'] =np.nan
+        # self.gpslabels.loc[(self.gpslabels.CurrentScreenX>self.gpslabels.ImageWidth) | (self.gpslabels.Label=='done'),'CurrentScreenX'] =np.nan
+        # self.gpslabels.loc[(self.gpslabels.CurrentScreenY>self.gpslabels.ImageHeight) | (self.gpslabels.Label=='done'),'CurrentScreenY'] =np.nan
+        # self.canvas.gpslabels = self.gpslabels
 
 
     def importDirImages(self, dirpath, pattern=None, load=True):
@@ -2248,7 +2336,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 data=data.join(self.locations,rsuffix='_Image')
                 data[['LabelLatitude','LabelLongitude']] = 0
                 self.gpslabels = data
-                self.processLocations()
                 self.gpslabels.to_csv(labels)
             else:
                 data = pd.DataFrame(columns=[ 'FileName', 'ScreenX', 'ScreenY', 'FileName_Image',

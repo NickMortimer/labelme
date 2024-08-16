@@ -6,6 +6,7 @@ from labelme import QT5
 from labelme.shape import Shape
 import labelme.utils
 import numpy as np
+import pandas as pd
 
 
 # TODO(unknown):
@@ -63,6 +64,8 @@ class Canvas(QtWidgets.QWidget):
         # Initialise local state.
         self.mode = self.EDIT
         self.shapes = []
+        self.targets = []
+        self.gpslabels = []
         self.shapesBackups = []
         self.current = None
         self.selectedShapes = []  # save the selected shapes here
@@ -679,6 +682,9 @@ class Canvas(QtWidgets.QWidget):
             )
 
         Shape.scale = self.scale
+        for shape in self.gpslabels:
+                if (shape.selected or not self._hideBackround) and self.isVisible(shape):
+                    shape.paint(p)
         for shape in self.shapes:
             if (shape.selected or not self._hideBackround) and self.isVisible(
                 shape
