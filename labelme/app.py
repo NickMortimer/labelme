@@ -1325,7 +1325,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
             )
             return data
-
         shapes = [format_shape(item.shape()) for item in self.labelList]
         flags = {}
         for i in range(self.flag_widget.count()):
@@ -1550,19 +1549,19 @@ class MainWindow(QtWidgets.QMainWindow):
         #find the shape files either side of the current file and load the targets
         #file name is the json file
         # Define the regular expression pattern
-        pattern = r'(\d+)\.json$'
-
+        pattern = r'(\d+)\.JPG$'
+        self.gpslabels = []
+        labels = {}
         match = re.search(pattern, filename)
         if match:
             try:
-                self.gpslabels = []
-                labels = {}
                 digits = match.group(1)
-                for dig in range(int(digits)-3,int(digits)+3):
+                for dig in range(int(digits)-6,int(digits)+6):
                     if (dig>0) and (dig!=int(digits)):
-                        f =glob.glob(f'{osp.dirname(filename)}/*{dig:0{len(digits)}}.json')[0]
-                        key= osp.splitext(osp.basename(f))[0]
-                        labels[key] = LabelFile(f)
+                        f =glob.glob(f'{osp.dirname(filename)}/*{dig:0{len(digits)}}.json')
+                        if len(f)>0:
+                            key= osp.splitext(osp.basename(f[0]))[0]
+                            labels[key] = LabelFile(f[0])
             except LabelFileError as e:
                 self.errorMessage(
                     self.tr("Error opening file"),
@@ -1597,7 +1596,7 @@ class MainWindow(QtWidgets.QMainWindow):
                                                                                                         elevation_m=row.RelativeAltitude,
                                                                                                         roll_deg=row.GimbalRollDegree,
                                                                                                         heading_deg=row.GimbalYawDegree))
-                        cam.setGPSpos(row.Latitude, row.Longitude, row.RelativeAltitude)
+                        cam.setGPSpos(row.Latitude, row.Longitude, row.AbsoluteAltitude)
                         
                         pos =cam.gpsFromImage(shape['points'])
                         if pos[:,0:2].shape[0]==1:
@@ -1625,7 +1624,7 @@ class MainWindow(QtWidgets.QMainWindow):
                         self.gpslabels.append(newshape)
             except: 
                 print(f'key not found {key}')           
-            self.canvas.gpslabels = self.gpslabels
+        self.canvas.gpslabels = self.gpslabels
 
     def loadFile(self, filename=None):
         """Load the specified file, or the last opened file if None."""
@@ -1726,7 +1725,7 @@ class MainWindow(QtWidgets.QMainWindow):
                                                                                                         elevation_m=item.RelativeAltitude,
                                                                                                         roll_deg=item.GimbalRollDegree,
                                                                                                         heading_deg=item.GimbalYawDegree))
-            self.canvas.cam.setGPSpos(item.Latitude, item.Longitude,item.RelativeAltitude)
+            self.canvas.cam.setGPSpos(item.Latitude, item.Longitude,item.AbsoluteAltitude)
             # self.processLocations()
             self.canvas.targets = []
             # for index,row in self.gpslabels[(~self.gpslabels.CurrentScreenX.isna()) & (~self.gpslabels.CurrentScreenY.isna())].iterrows():
@@ -1753,8 +1752,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.loadLabels(self.labelFile.shapes)
             if self.labelFile.flags is not None:
                 flags.update(self.labelFile.flags)
+        self.loadgps(self.filename)                
         self.loadFlags(flags)
-        self.loadgps(self.labelFile.filename)
         if self._config["keep_prev"] and self.noShapes():
             self.loadShapes(prev_shapes, replace=False)
             self.setDirty()
@@ -2322,28 +2321,28 @@ class MainWindow(QtWidgets.QMainWindow):
             self.locations = pd.read_csv(locations,index_col='Key')
         else:
             self.locations = None
-        if os.path.exists(labels):
-            self.gpslabels = pd.read_csv(labels,index_col='Key')
-        else:
-            jsonfiles = glob.glob(os.path.join(dirpath,'*.json'))
-            if jsonfiles:
-                data = pd.concat([loadshapes(file) for file in jsonfiles])
-                data['FileName'] = data.FilePath.apply(os.path.basename)
-                data['Key'] = data['FileName'].apply(lambda x:os.path.splitext(x)[0])
-                data['Points']= data.points.apply(np.array).apply(lambda x: np.mean(x,axis=0))
-                data[['ScreenX','ScreenY']]=data.points.apply(np.array).apply(lambda x: np.mean(x,axis=0).astype(int)).apply(pd.Series)
-                data = data.drop(columns=['points','group_id', 'shape_type', 'flags','FilePath','Points']).set_index('Key').sort_index().rename(columns={'label':'Label'})
-                data=data.join(self.locations,rsuffix='_Image')
-                data[['LabelLatitude','LabelLongitude']] = 0
-                self.gpslabels = data
-                self.gpslabels.to_csv(labels)
-            else:
-                data = pd.DataFrame(columns=[ 'FileName', 'ScreenX', 'ScreenY', 'FileName_Image',
-                                              'TimeStamp', 'Longitude', 'Latitude', 'AbsoluteAltitude',
-                                              'CalibratedFocalLength', 'CalibratedOpticalCenterX',
-                                              'CalibratedOpticalCenterY', 'ImageHeight', 'ImageWidth',
-                                              'GimbalPitchDegree', 'GimbalRollDegree', 'GimbalYawDegree',
-                                              'LabelLatitude','LabelLongitude'])
+        # if os.path.exists(labels):
+        #     self.gpslabels = pd.read_csv(labels,index_col='Key')
+        # else:
+        #     jsonfiles = glob.glob(os.path.join(dirpath,'*.json'))
+        #     if jsonfiles:
+        #         data = pd.concat([loadshapes(file) for file in jsonfiles])
+        #         data['FileName'] = data.FilePath.apply(os.path.basename)
+        #         data['Key'] = data['FileName'].apply(lambda x:os.path.splitext(x)[0])
+        #         data['Points']= data.points.apply(np.array).apply(lambda x: np.mean(x,axis=0))
+        #         data[['ScreenX','ScreenY']]=data.points.apply(np.array).apply(lambda x: np.mean(x,axis=0).astype(int)).apply(pd.Series)
+        #         data = data.drop(columns=['points','group_id', 'shape_type', 'flags','FilePath','Points']).set_index('Key').sort_index().rename(columns={'label':'Label'})
+        #         data=data.join(self.locations,rsuffix='_Image')
+        #         data[['LabelLatitude','LabelLongitude']] = 0
+        #         self.gpslabels = data
+        #         self.gpslabels.to_csv(labels)
+        #     else:
+        #         data = pd.DataFrame(columns=[ 'FileName', 'ScreenX', 'ScreenY', 'FileName_Image',
+        #                                       'TimeStamp', 'Longitude', 'Latitude', 'AbsoluteAltitude',
+        #                                       'CalibratedFocalLength', 'CalibratedOpticalCenterX',
+        #                                       'CalibratedOpticalCenterY', 'ImageHeight', 'ImageWidth',
+        #                                       'GimbalPitchDegree', 'GimbalRollDegree', 'GimbalYawDegree',
+        #                                       'LabelLatitude','LabelLongitude'])
         self.lastOpenDir = dirpath
         self.filename = None
         self.fileListWidget.clear()
