@@ -96,6 +96,16 @@ class Canvas(QtWidgets.QWidget):
         self._painter = QtGui.QPainter()
         self._cursor = CURSOR_DEFAULT
         self.cam = None
+        self.stamp_mode = False
+        self.stamp_radius_px = 10.0
+        self.stamp_surface_label = "turtle_surface"
+        self.stamp_deep_label = "turtle_deep"
+        self.pending_stamp_label = None
+        self.letterbox_enabled = False
+        self.letterbox_aspect_ratio = None
+        self.fov_context_px = 100
+        self.fov_frame_w = None
+        self.fov_frame_h = None
         # Menus:
         # 0: right-click without selection and dragging of shapes
         # 1: right-click with selection and dragging of shapes
@@ -410,6 +420,26 @@ class Canvas(QtWidgets.QWidget):
                         if int(ev.modifiers()) == QtCore.Qt.ControlModifier:
                             self.finalise()
                 elif not self.outOfPixmap(pos):
+                    if self.createMode == "circle" and self.stamp_mode:
+                        radius = float(self.stamp_radius_px)
+                        max_x = max(0.0, self.pixmap.width() - 1.0)
+                        max_y = max(0.0, self.pixmap.height() - 1.0)
+                        edge_x = min(max(pos.x() + radius, 0.0), max_x)
+                        edge_y = min(max(pos.y(), 0.0), max_y)
+                        if edge_x != pos.x() or edge_y != pos.y():
+                            self.pending_stamp_label = (
+                                self.stamp_deep_label
+                                if (ev.modifiers() & QtCore.Qt.ShiftModifier)
+                                else self.stamp_surface_label
+                            )
+                            self.current = Shape(shape_type="circle")
+                            self.current.addPoint(pos)
+                            self.current.addPoint(
+                                QtCore.QPointF(edge_x, edge_y)
+                            )
+                            self.finalise()
+                        return
+
                     # Create new shape.
                     self.current = Shape(shape_type=self.createMode)
                     self.current.addPoint(pos)
@@ -708,6 +738,60 @@ class Canvas(QtWidgets.QWidget):
             drawing_shape.addPoint(self.line[1])
             drawing_shape.fill = True
             drawing_shape.paint(p)
+
+        if self.letterbox_enabled and self.letterbox_aspect_ratio:
+            viewport = self.parentWidget()
+            if viewport is not None:
+                top_left = self.mapFrom(viewport, QtCore.QPoint(0, 0))
+                visible_rect = QtCore.QRect(top_left, viewport.size())
+                visible_rect = visible_rect.intersected(self.rect())
+                if not visible_rect.isEmpty() and visible_rect.height() > 0:
+                    scaled_w = self.pixmap.width() * self.scale
+                    scaled_h = self.pixmap.height() * self.scale
+                    img_x = int(round(max(0.0, (self.width() - scaled_w) / 2.0)))
+                    img_y = int(round(max(0.0, (self.height() - scaled_h) / 2.0)))
+                    image_rect = QtCore.QRect(
+                        img_x,
+                        img_y,
+                        int(round(scaled_w)),
+                        int(round(scaled_h)),
+                    )
+                    visible_rect = visible_rect.intersected(image_rect)
+
+                if not visible_rect.isEmpty() and visible_rect.height() > 0:
+                    target_aspect = float(self.letterbox_aspect_ratio)
+                    vr_w = visible_rect.width()
+                    vr_h = visible_rect.height()
+                    if target_aspect > 0:
+                        if (vr_w / vr_h) > target_aspect:
+                            portal_h = vr_h
+                            portal_w = int(round(vr_h * target_aspect))
+                            portal_x = visible_rect.x() + (vr_w - portal_w) // 2
+                            portal_y = visible_rect.y()
+                        else:
+                            portal_w = vr_w
+                            portal_h = int(round(vr_w / target_aspect))
+                            portal_x = visible_rect.x()
+                            portal_y = visible_rect.y() + (vr_h - portal_h) // 2
+
+                        margin = max(0, int(self.fov_context_px))
+                        frame_w = max(1, portal_w - (2 * margin))
+                        frame_h = max(1, portal_h - (2 * margin))
+                        if self.fov_frame_w is not None:
+                            frame_w = max(frame_w, max(1, int(self.fov_frame_w)))
+                        if self.fov_frame_h is not None:
+                            frame_h = max(frame_h, max(1, int(self.fov_frame_h)))
+                        frame_w = min(frame_w, portal_w)
+                        frame_h = min(frame_h, portal_h)
+                        frame_x = portal_x + max(0, (portal_w - frame_w) // 2)
+                        frame_y = portal_y + max(0, (portal_h - frame_h) // 2)
+
+                        p.save()
+                        p.resetTransform()
+                        p.setPen(QtGui.QPen(QtGui.QColor(255, 215, 0), 2))
+                        p.setBrush(QtCore.Qt.NoBrush)
+                        p.drawRect(frame_x, frame_y, frame_w, frame_h)
+                        p.restore()
 
         p.end()
 

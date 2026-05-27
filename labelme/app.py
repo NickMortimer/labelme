@@ -6,8 +6,11 @@ import html
 import math
 import os
 import os.path as osp
+import csv
 import re
 import json
+import datetime
+import time
 import webbrowser
 from PIL.ImageOps import fit, scale
 import numpy as np
@@ -52,8 +55,41 @@ import glob
 LABEL_COLORMAP = imgviz.label_colormap()
 
 
+def _fov_offset_with_overlap(
+    maximum,
+    index,
+    tiles_per_axis=6,
+):
+    max_value = max(0, int(maximum))
+    tiles = max(1, int(tiles_per_axis))
+    idx = min(max(0, int(index)), tiles - 1)
+    if tiles <= 1:
+        return 0
+    return int(round(max_value * idx / float(tiles - 1)))
+
+
+def _fov_axis_step(maximum, index, tiles_per_axis=6):
+    tiles = max(1, int(tiles_per_axis))
+    idx = min(max(0, int(index)), tiles - 1)
+    if tiles <= 1:
+        return max(1, int(maximum))
+    if idx < tiles - 1:
+        return max(
+            1,
+            _fov_offset_with_overlap(maximum, idx + 1, tiles)
+            - _fov_offset_with_overlap(maximum, idx, tiles),
+        )
+    return max(
+        1,
+        _fov_offset_with_overlap(maximum, idx, tiles)
+        - _fov_offset_with_overlap(maximum, idx - 1, tiles),
+    )
+
+
 class MainWindow(QtWidgets.QMainWindow):
 
+    FOV_TILES_PER_AXIS = 6
+    FOV_OVERLAP_PX = 100
     FIT_WINDOW, FIT_WIDTH, MANUAL_ZOOM,FIT_FIELD = 0, 1, 2 ,3
 
     def __init__(
@@ -175,7 +211,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.file_dock.setWidget(fileListWidget)
 
         self.zoomWidget = ZoomWidget()
-        self.fovWidget = FovWidget()
+        self.fovWidget = FovWidget(numberOfViews=self.FOV_TILES_PER_AXIS)
         self.setAcceptDrops(True)
 
         self.canvas = self.labelList.canvas = Canvas(
@@ -184,6 +220,22 @@ class MainWindow(QtWidgets.QMainWindow):
             num_backups=self._config["canvas"]["num_backups"],
             crosshair=self._config["canvas"]["crosshair"],
         )
+        stamp_mode_cfg = self._config.get("stamp_mode") or {}
+        stamp_labels_cfg = stamp_mode_cfg.get("labels") or {}
+        self.canvas.stamp_surface_label = stamp_labels_cfg.get(
+            "surface", "turtle_surface"
+        )
+        self.canvas.stamp_deep_label = stamp_labels_cfg.get(
+            "deep", "turtle_deep"
+        )
+        self.canvas.stamp_radius_px = float(
+            stamp_mode_cfg.get("radius_px", 10)
+        )
+        self.canvas.letterbox_enabled = False
+        self.canvas.letterbox_aspect_ratio = None
+        self.canvas.fov_context_px = self.FOV_OVERLAP_PX
+        self.canvas.fov_frame_w = None
+        self.canvas.fov_frame_h = None
         self.canvas.zoomRequest.connect(self.zoomRequest)
 
         scrollArea = QtWidgets.QScrollArea()
@@ -563,6 +615,14 @@ class MainWindow(QtWidgets.QMainWindow):
             self.tr("Jump to the selected polygon"),
             enabled=False,
         )
+        dropDoneMarker = action(
+            self.tr("Drop &Done Marker"),
+            self.dropDoneMarker,
+            shortcuts["drop_done_marker"],
+            "new",
+            self.tr("Drop a 'done' circle marker at the FOV center"),
+            enabled=False,
+        )
         fitWidth = action(
             self.tr("Fit &Width"),
             self.setFitWidth,
@@ -624,6 +684,17 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         fill_drawing.trigger()
 
+        toggleStampMode = action(
+            self.tr("Stamp Mode"),
+            self.toggleStampMode,
+            shortcuts.get("toggle_stamp_mode"),
+            "new",
+            self.tr("Enable one-click stamp labels"),
+            checkable=True,
+            checked=False,
+            enabled=True,
+        )
+
         # Lavel list context menu.
         labelMenu = QtWidgets.QMenu()
         utils.addActions(labelMenu, (edit, delete,jumpPloygon))
@@ -669,6 +740,8 @@ class MainWindow(QtWidgets.QMainWindow):
             nextFOV=nextFOV,
             prevFOV=prevFOV,
             jumpPloygon=jumpPloygon,
+            dropDoneMarker=dropDoneMarker,
+            toggleStampMode=toggleStampMode,
             brightnessContrast=brightnessContrast,
             zoomActions=zoomActions,
             openNextImg=openNextImg,
@@ -680,6 +753,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 edit,
                 duplicate,
                 delete,
+                toggleStampMode,
                 None,
                 undo,
                 undoLastPoint,
@@ -687,6 +761,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 removePoint,
                 None,
                 toggle_keep_prev_mode,
+                dropDoneMarker,
             ),
             # menu shown at right click
             menu=(
@@ -705,6 +780,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 undo,
                 undoLastPoint,
                 removePoint,
+                dropDoneMarker,
             ),
             onLoadActive=(
                 close,
@@ -716,6 +792,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 createLineStripMode,
                 editMode,
                 brightnessContrast,
+                dropDoneMarker,
             ),
             onShapesPresent=(saveAs, hideAll, showAll),
         )
@@ -841,6 +918,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.fit_window = False
         self.zoom_values = {}  # key=filename, value=(zoom_mode, zoom_value)
         self.brightnessContrast_values = {}
+        self.fov_started_at_monotonic = None
+        self.fov_started_at_iso = None
         self.scroll_values = {
             Qt.Horizontal: {},
             Qt.Vertical: {},
@@ -1078,6 +1157,17 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def setEditMode(self):
         self.toggleDrawMode(True)
+
+    def toggleStampMode(self, enabled):
+        self.canvas.stamp_mode = bool(enabled)
+        if enabled:
+            self.toggleDrawMode(False, createMode="circle")
+        self.status(
+            self.tr("Stamp mode {}.").format(
+                self.tr("enabled") if enabled else self.tr("disabled")
+            ),
+            2000,
+        )
 
     def updateFileMenu(self):
         current = self.filename
@@ -1409,13 +1499,19 @@ class MainWindow(QtWidgets.QMainWindow):
 
         position MUST be in global coordinates.
         """
+        stamp_label = getattr(self.canvas, "pending_stamp_label", None)
+        if stamp_label:
+            self.canvas.pending_stamp_label = None
+
         items = self.uniqLabelList.selectedItems()
         text = None
         if items:
             text = items[0].data(Qt.UserRole)
         flags = {}
         group_id = None
-        if self._config["display_label_popup"] or not text:
+        if stamp_label:
+            text = stamp_label
+        elif self._config["display_label_popup"] or not text:
             previous_text = self.labelDialog.edit.text()
             text, flags, group_id = self.labelDialog.popUp(text)
             if not text:
@@ -1457,6 +1553,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.actions.fitWindow.setChecked(False)
         self.actions.fitFOV.setChecked(False)
         self.zoomMode = self.MANUAL_ZOOM
+        self._updateLetterboxState()
         self.zoomWidget.setValue(value)
         self.zoom_values[self.filename] = (self.zoomMode, value)
 
@@ -1495,24 +1592,97 @@ class MainWindow(QtWidgets.QMainWindow):
         if value:
             self.actions.fitWidth.setChecked(False)
         self.zoomMode = self.FIT_WINDOW if value else self.MANUAL_ZOOM
+        self._updateLetterboxState()
         self.adjustScale()
         
     def setFitFOV(self, value=True):
         if value:
             self.actions.fitFOV.setChecked(False)
         self.zoomMode = self.FIT_FIELD if value else self.MANUAL_ZOOM
-        self.adjustScale()        
+        self._updateLetterboxState()
+        self.adjustScale()
+
     def nextFOV(self):
         self.fovWidget.setValue(self.fovWidget.value()+1)
         
     def prevFOV(self):
         self.fovWidget.setValue(self.fovWidget.value()-1)
 
+    def _getFovTimingCsvPath(self):
+        base_dir = None
+        if self.output_dir:
+            base_dir = self.output_dir
+        elif self.filename:
+            base_dir = osp.dirname(self.filename)
+        if base_dir:
+            dir_name = osp.basename(osp.normpath(base_dir)) or "output"
+            return osp.join(base_dir, "{}_timings.csv".format(dir_name))
+        return None
+
+    def _startFovTimer(self):
+        self.fov_started_at_monotonic = time.monotonic()
+        self.fov_started_at_iso = (
+            datetime.datetime.now(datetime.timezone.utc)
+            .astimezone()
+            .isoformat(timespec="seconds")
+        )
+
+    def _appendFovTiming(self):
+        if self.fov_started_at_monotonic is None:
+            return
+        csv_path = self._getFovTimingCsvPath()
+        if not csv_path:
+            return
+
+        elapsed_s = time.monotonic() - self.fov_started_at_monotonic
+        row = {
+            "completed_at": (
+                datetime.datetime.now(datetime.timezone.utc)
+                .astimezone()
+                .isoformat(timespec="seconds")
+            ),
+            "started_at": self.fov_started_at_iso,
+            "image": osp.basename(self.filename) if self.filename else "",
+            "fov": int(self.fovWidget.value()),
+            "elapsed_seconds": f"{elapsed_s:.3f}",
+        }
+
+        file_exists = osp.exists(csv_path)
+        with open(csv_path, "a", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(
+                f,
+                fieldnames=[
+                    "completed_at",
+                    "started_at",
+                    "image",
+                    "fov",
+                    "elapsed_seconds",
+                ],
+            )
+            if not file_exists:
+                writer.writeheader()
+            writer.writerow(row)
+
     def setFitWidth(self, value=True):
         if value:
             self.actions.fitWindow.setChecked(False)
         self.zoomMode = self.FIT_WIDTH if value else self.MANUAL_ZOOM
+        self._updateLetterboxState()
         self.adjustScale()
+
+    def _updateLetterboxState(self):
+        enabled = self.zoomMode == self.FIT_FIELD and not self.image.isNull()
+        self.canvas.letterbox_enabled = enabled
+        self.canvas.fov_context_px = self.FOV_OVERLAP_PX
+        if enabled:
+            self.canvas.letterbox_aspect_ratio = (
+                self.image.width() / self.image.height()
+            )
+        else:
+            self.canvas.letterbox_aspect_ratio = None
+            self.canvas.fov_frame_w = None
+            self.canvas.fov_frame_h = None
+        self.canvas.update()
 
     def enableKeepPrevScale(self, enabled):
         self._config["keep_prev_scale"] = enabled
@@ -1582,7 +1752,9 @@ class MainWindow(QtWidgets.QMainWindow):
                             cam = ct.Camera(ct.RectilinearProjection(focallength_x_px=row.CalibratedFocalLengthX,
                                                                     focallength_y_px=row.CalibratedFocalLengthY,
                                                                     center_x_px=row.CalibratedOpticalCenterX,
-                                                                    center_y_px=row.CalibratedOpticalCenterY),
+                                                                    center_y_px=row.CalibratedOpticalCenterY,
+                                                                    image_width_px=self.image.width(),
+                                                                    image_height_px=self.image.height()),
                                                                     orientation= ct.SpatialOrientation(tilt_deg=row.GimbalPitchDegree,
                                                                                                     elevation_m=row.RelativeAltitude,
                                                                                                     roll_deg=row.GimbalRollDegree,
@@ -1591,7 +1763,9 @@ class MainWindow(QtWidgets.QMainWindow):
                         else:
                             cam = ct.Camera(ct.RectilinearProjection(focallength_px=row.CalibratedFocalLength,
                                                                     center_x_px=row.CalibratedOpticalCenterX,
-                                                                    center_y_px=row.CalibratedOpticalCenterY),
+                                                                    center_y_px=row.CalibratedOpticalCenterY,
+                                                                    image_width_px=self.image.width(),
+                                                                    image_height_px=self.image.height()),
                                                                     orientation= ct.SpatialOrientation(tilt_deg=row.GimbalPitchDegree,
                                                                                                         elevation_m=row.RelativeAltitude,
                                                                                                         roll_deg=row.GimbalRollDegree,
@@ -1711,7 +1885,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.canvas.cam = ct.Camera(ct.RectilinearProjection(focallength_x_px=item.CalibratedFocalLengthX,
                                                                      focallength_y_px=item.CalibratedFocalLengthY,
                                                                         center_x_px=item.CalibratedOpticalCenterX,
-                                                                        center_y_px=item.CalibratedOpticalCenterY),
+                                                                        center_y_px=item.CalibratedOpticalCenterY,
+                                                                        image_width_px=image.width(),
+                                                                        image_height_px=image.height()),
                                                                         orientation= ct.SpatialOrientation(tilt_deg=item.GimbalPitchDegree,
                                                                                                         elevation_m=item.RelativeAltitude,
                                                                                                         roll_deg=item.GimbalRollDegree,
@@ -1720,7 +1896,9 @@ class MainWindow(QtWidgets.QMainWindow):
             else:
                 self.canvas.cam = ct.Camera(ct.RectilinearProjection(focallength_px=item.CalibratedFocalLength,
                                                                         center_x_px=item.CalibratedOpticalCenterX,
-                                                                        center_y_px=item.CalibratedOpticalCenterY),
+                                                                        center_y_px=item.CalibratedOpticalCenterY,
+                                                                        image_width_px=image.width(),
+                                                                        image_height_px=image.height()),
                                                                         orientation= ct.SpatialOrientation(tilt_deg=item.GimbalPitchDegree,
                                                                                                         elevation_m=item.RelativeAltitude,
                                                                                                         roll_deg=item.GimbalRollDegree,
@@ -1820,6 +1998,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.canvas.update()
 
     def adjustScale(self, initial=False):
+        self._updateLetterboxState()
         value = self.scalers[self.FIT_WINDOW if initial else self.zoomMode]()
         value = int(100 * value)
         self.zoomWidget.setValue(value)
@@ -1840,7 +2019,9 @@ class MainWindow(QtWidgets.QMainWindow):
     def scaleFitFOV(self):
         """Figure out the size of the pixmap to fit the main widget."""
         e = 2.0  # So that no scrollbars are generated.
-        fov =self._config['default_FOV']
+        fov = self.FOV_TILES_PER_AXIS
+        overlap_x = self.FOV_OVERLAP_PX
+        overlap_y = self.FOV_OVERLAP_PX
         w1 = self.centralWidget().width() - e
         h1 = self.centralWidget().height() - e
         a1 = w1 / h1
@@ -1850,19 +2031,74 @@ class MainWindow(QtWidgets.QMainWindow):
         w2 = self.canvas.pixmap.width() - 0.0
         h2 = self.canvas.pixmap.height() - 0.0
         a2 = w2 / h2
-        return w1 / w2 if a2 >= a1 else h1 / h2
+        if a2 >= a1:
+            vw = self.centralWidget().width() - e
+            vh = self.centralWidget().height() - e
+            # Image is wider than viewport: portal is width-limited.
+            portal_w = vw
+            portal_h = vw / a2
+        else:
+            vw = self.centralWidget().width() - e
+            vh = self.centralWidget().height() - e
+            # Image is taller than viewport: portal is height-limited.
+            portal_h = vh
+            portal_w = vh * a2
+
+        step_x = max(1.0, portal_w - (2.0 * overlap_x))
+        step_y = max(1.0, portal_h - (2.0 * overlap_y))
+        target_w = portal_w + (fov - 1) * step_x
+        target_h = portal_h + (fov - 1) * step_y
+        return max(target_w / w2, target_h / h2)
     
     def scaleGotoFOV(self):
         self.setFitFOV()
         index = int(self.fovWidget.value())-1
-        """Figure out the size of the pixmap to fit the main widget."""
-        fov =self._config['default_FOV']
-        rows = index // fov
-        cols = index % fov
+        row = index // self.FOV_TILES_PER_AXIS
+        col = index % self.FOV_TILES_PER_AXIS
+        scale = 0.01 * self.zoomWidget.value()
+        scaled_width = self.canvas.pixmap.width() * scale
+        scaled_height = self.canvas.pixmap.height() * scale
+
+        vw = self.centralWidget().width() - 2.0
+        vh = self.centralWidget().height() - 2.0
+        img_aspect = (
+            self.canvas.pixmap.width() / self.canvas.pixmap.height()
+            if self.canvas.pixmap.height() > 0
+            else 1.0
+        )
+        if img_aspect >= (vw / vh):
+            portal_w = vw
+            portal_h = vw / img_aspect
+        else:
+            portal_h = vh
+            portal_w = vh * img_aspect
+
+        overlap_x = self.FOV_OVERLAP_PX
+        overlap_y = self.FOV_OVERLAP_PX
         bar = self.scrollBars[Qt.Horizontal]
-        bar.setValue(bar.pageStep()*cols)
+        self.canvas.fov_frame_w = _fov_axis_step(
+            bar.maximum(), col, self.FOV_TILES_PER_AXIS
+        )
+        bar.setValue(
+            _fov_offset_with_overlap(
+                maximum=bar.maximum(),
+                index=col,
+                tiles_per_axis=self.FOV_TILES_PER_AXIS,
+            )
+        )
         bar = self.scrollBars[Qt.Vertical]
-        bar.setValue(bar.pageStep()*rows)
+        self.canvas.fov_frame_h = _fov_axis_step(
+            bar.maximum(), row, self.FOV_TILES_PER_AXIS
+        )
+        self.canvas.update()
+        bar.setValue(
+            _fov_offset_with_overlap(
+                maximum=bar.maximum(),
+                index=row,
+                tiles_per_axis=self.FOV_TILES_PER_AXIS,
+            )
+        )
+        self._startFovTimer()
 
     def scaleFitWidth(self):
         # The epsilon does not seem to work too well here.
@@ -1882,6 +2118,46 @@ class MainWindow(QtWidgets.QMainWindow):
                 Qt.Vertical,
                 y*self.canvas.scale -self.centralWidget().height()/2,
             )
+
+    def dropDoneMarker(self):
+        if self.image.isNull() or self.canvas.pixmap is None:
+            return
+
+        if self.zoomMode != self.FIT_FIELD:
+            self._goToFirstFOV()
+            return
+
+        is_last_fov = int(self.fovWidget.value()) >= self.fovWidget.maximum()
+
+        viewport = self.centralWidget().viewport()
+        view_center = QtCore.QPointF(
+            self.scrollBars[Qt.Horizontal].value() + viewport.width() / 2.0,
+            self.scrollBars[Qt.Vertical].value() + viewport.height() / 2.0,
+        )
+        center = self.canvas.transformPos(view_center)
+
+        max_x = max(0.0, self.canvas.pixmap.width() - 1.0)
+        max_y = max(0.0, self.canvas.pixmap.height() - 1.0)
+        cx = min(max(center.x(), 0.0), max_x)
+        cy = min(max(center.y(), 0.0), max_y)
+
+        radius = 40.0
+        rx = min(cx + radius, max_x)
+
+        shape = Shape(label="done", shape_type="circle", group_id=None)
+        shape.flags = {}
+        shape.addPoint(QtCore.QPointF(cx, cy))
+        shape.addPoint(QtCore.QPointF(rx, cy))
+        shape.close()
+
+        self.loadShapes([shape], replace=False)
+        self.setDirty()
+        self._appendFovTiming()
+        if is_last_fov:
+            self.openNextImg(load=True)
+            self._goToFirstFOV()
+        else:
+            self.nextFOV()
 
 
     def enableSaveImageWithData(self, enabled):
@@ -1952,6 +2228,14 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self._config["keep_prev"] = keep_prev
 
+    def _goToFirstFOV(self):
+        self.setFitFOV()
+        # Ensure first FOV is applied even when the value is already 1.
+        if int(self.fovWidget.value()) != 1:
+            self.fovWidget.setValue(1)
+        else:
+            self.scaleGotoFOV()
+
     def openNextImg(self, _value=False, load=True):
         keep_prev = self._config["keep_prev"]
         if QtWidgets.QApplication.keyboardModifiers() == (
@@ -1981,7 +2265,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
 
             if self.FIT_FIELD == self.zoomMode:
-                self.fovWidget.setValue(1)
+                self._goToFirstFOV()
 
         self._config["keep_prev"] = keep_prev
 

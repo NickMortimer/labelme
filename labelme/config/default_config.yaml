@@ -19,6 +19,11 @@ shape_color: auto  # null, 'auto', 'manual'
 shift_auto_shape_color: 0
 label_colors: null
 default_FOV: 6
+stamp_mode:
+  radius_px: 10
+  labels:
+    surface: turtle_surface
+    deep: turtle_deep
 
 shape:
   # drawing
@@ -98,7 +103,9 @@ shortcuts:
   fit_fov: Ctrl+Shift+V
   next_fov: PgDown
   prev_fov: PgUp
+  toggle_stamp_mode: T
   jump_ploygon: Ctrl+Space
+  drop_done_marker: Space
 
   create_polygon: Ctrl+N
   create_rectangle: Ctrl+R

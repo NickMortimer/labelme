@@ -13,6 +13,40 @@ here = osp.dirname(osp.abspath(__file__))
 data_dir = osp.join(here, "data")
 
 
+@pytest.mark.parametrize(
+    "maximum",
+    [
+        (0,),
+        (1000,),
+        (2400,),
+        (3200,),
+    ],
+)
+def test_fov_offset_fixed_6x6(maximum):
+    offsets = [
+        labelme.app._fov_offset_with_overlap(
+            maximum=maximum,
+            index=i,
+            tiles_per_axis=6,
+        )
+        for i in range(6)
+    ]
+
+    assert offsets[0] == 0
+    assert offsets[-1] == max(0, int(maximum))
+    assert all(offsets[i] <= offsets[i + 1] for i in range(5))
+    if maximum > 0:
+        expected_step = maximum / 5.0
+        assert abs((offsets[1] - offsets[0]) - expected_step) <= 1
+
+
+@pytest.mark.parametrize("maximum", [1000, 2400, 3200])
+def test_fov_axis_step_is_positive(maximum):
+    steps = [
+        labelme.app._fov_axis_step(maximum=maximum, index=i, tiles_per_axis=6)
+        for i in range(6)
+    ]
+    assert all(step >= 1 for step in steps)
 def _win_show_and_wait_imageData(qtbot, win):
     win.show()
 
