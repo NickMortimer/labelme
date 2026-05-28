@@ -24,6 +24,15 @@ stamp_mode:
   labels:
     surface: turtle_surface
     deep: turtle_deep
+  visual:
+    cursor:
+      enabled: true
+    preview:
+      enabled: true
+      # Shift-stamp (deep) uses a warm color; normal stamp (surface) uses cyan.
+      surface_color: [0, 200, 255, 220]
+      deep_color: [255, 140, 0, 220]
+      fill_alpha: 48
 
 shape:
   # drawing

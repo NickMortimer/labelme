@@ -101,6 +101,13 @@ class Canvas(QtWidgets.QWidget):
         self.stamp_surface_label = "turtle_surface"
         self.stamp_deep_label = "turtle_deep"
         self.pending_stamp_label = None
+        self.stamp_cursor_enabled = True
+        self.stamp_preview_enabled = True
+        self.stamp_preview_surface_color = QtGui.QColor(0, 200, 255, 220)
+        self.stamp_preview_deep_color = QtGui.QColor(255, 140, 0, 220)
+        self.stamp_preview_fill_alpha = 48
+        self._stamp_shift_down = False
+        self._stamp_cursor_cache = {}
         self.letterbox_enabled = False
         self.letterbox_aspect_ratio = None
         self.fov_context_px = 100
@@ -200,6 +207,109 @@ class Canvas(QtWidgets.QWidget):
             self.unHighlight()
             self.deSelectShape()
 
+    def _parseColorConfig(self, value, default):
+        if isinstance(value, (list, tuple)) and len(value) in (3, 4):
+            channels = [int(v) for v in value]
+            if len(channels) == 3:
+                channels.append(220)
+            return QtGui.QColor(*channels)
+        return QtGui.QColor(default)
+
+    def setStampConfig(self, stamp_mode_cfg):
+        stamp_mode_cfg = stamp_mode_cfg or {}
+        labels_cfg = stamp_mode_cfg.get("labels") or {}
+        self.stamp_surface_label = labels_cfg.get(
+            "surface", self.stamp_surface_label
+        )
+        self.stamp_deep_label = labels_cfg.get("deep", self.stamp_deep_label)
+        self.stamp_radius_px = float(
+            stamp_mode_cfg.get("radius_px", self.stamp_radius_px)
+        )
+
+        visual_cfg = stamp_mode_cfg.get("visual") or {}
+        cursor_cfg = visual_cfg.get("cursor") or {}
+        preview_cfg = visual_cfg.get("preview") or {}
+        self.stamp_cursor_enabled = bool(cursor_cfg.get("enabled", True))
+        self.stamp_preview_enabled = bool(preview_cfg.get("enabled", True))
+        self.stamp_preview_surface_color = self._parseColorConfig(
+            preview_cfg.get("surface_color"), self.stamp_preview_surface_color
+        )
+        self.stamp_preview_deep_color = self._parseColorConfig(
+            preview_cfg.get("deep_color"), self.stamp_preview_deep_color
+        )
+        self.stamp_preview_fill_alpha = int(
+            preview_cfg.get("fill_alpha", self.stamp_preview_fill_alpha)
+        )
+        self.stamp_preview_fill_alpha = max(0, min(255, self.stamp_preview_fill_alpha))
+        self._stamp_cursor_cache = {}
+
+    def _isStampDrawingMode(self):
+        return self.stamp_mode and self.drawing() and self.createMode == "circle"
+
+    def _isShiftModifierActive(self, modifiers=None):
+        if modifiers is None:
+            modifiers = QtWidgets.QApplication.keyboardModifiers()
+        return bool(modifiers & QtCore.Qt.ShiftModifier)
+
+    def _buildStampCursor(self, shift_active):
+        color = (
+            self.stamp_preview_deep_color
+            if shift_active
+            else self.stamp_preview_surface_color
+        )
+        pixmap = QtGui.QPixmap(32, 32)
+        pixmap.fill(QtCore.Qt.transparent)
+
+        painter = QtGui.QPainter(pixmap)
+        painter.setRenderHint(QtGui.QPainter.Antialiasing)
+
+        base_pen = QtGui.QPen(QtGui.QColor(25, 25, 25, 220), 2)
+        base_pen.setCapStyle(QtCore.Qt.RoundCap)
+        painter.setPen(base_pen)
+        painter.setBrush(QtGui.QBrush(QtGui.QColor(255, 255, 255, 220)))
+
+        # Handle and body of a simple stamper icon.
+        painter.drawRoundedRect(QtCore.QRectF(13, 2, 6, 8), 2, 2)
+        painter.drawRoundedRect(QtCore.QRectF(9, 9, 14, 9), 3, 3)
+
+        painter.setPen(QtGui.QPen(color, 2))
+        fill_color = QtGui.QColor(color)
+        fill_color.setAlpha(self.stamp_preview_fill_alpha)
+        painter.setBrush(QtGui.QBrush(fill_color))
+        painter.drawEllipse(QtCore.QRectF(8, 18, 16, 10))
+
+        painter.end()
+        return QtGui.QCursor(pixmap, 16, 26)
+
+    def _updateStampCursorState(self, modifiers=None):
+        shift_active = self._isShiftModifierActive(modifiers)
+        self._stamp_shift_down = shift_active
+        if self._isStampDrawingMode() and self.stamp_cursor_enabled:
+            if shift_active not in self._stamp_cursor_cache:
+                self._stamp_cursor_cache[shift_active] = self._buildStampCursor(
+                    shift_active
+                )
+            self.overrideCursor(self._stamp_cursor_cache[shift_active])
+        elif self.drawing():
+            self.overrideCursor(CURSOR_DRAW)
+
+    def refreshStampVisuals(self, shift_active=None):
+        """Refresh cursor and preview ring. Pass shift_active explicitly
+        to avoid Qt modifier-timing issues on key press/release events."""
+        if shift_active is not None:
+            self._stamp_shift_down = shift_active
+            if self._isStampDrawingMode() and self.stamp_cursor_enabled:
+                if shift_active not in self._stamp_cursor_cache:
+                    self._stamp_cursor_cache[shift_active] = (
+                        self._buildStampCursor(shift_active)
+                    )
+                self.overrideCursor(self._stamp_cursor_cache[shift_active])
+            elif self.drawing():
+                self.overrideCursor(CURSOR_DRAW)
+        else:
+            self._updateStampCursorState()
+        self.update()
+
     def unHighlight(self):
         if self.hShape:
             self.hShape.highlightClear()
@@ -238,8 +348,7 @@ class Canvas(QtWidgets.QWidget):
         # Polygon drawing.
         if self.drawing():
             self.line.shape_type = self.createMode
-
-            self.overrideCursor(CURSOR_DRAW)
+            self._updateStampCursorState(ev.modifiers())
             if not self.current:
                 self.repaint()  # draw crosshair
                 return
@@ -710,6 +819,34 @@ class Canvas(QtWidgets.QWidget):
                 int(self.prevMovePoint.x()),
                 self.height() - 1,
             )
+
+        # Draw a stamp preview ring while in one-click stamp mode.
+        if (
+            self.stamp_preview_enabled
+            and self._isStampDrawingMode()
+            and self.prevMovePoint
+            and not self.current
+            and not self.outOfPixmap(self.prevMovePoint)
+        ):
+            p.save()
+            preview_color = (
+                self.stamp_preview_deep_color
+                if self._stamp_shift_down
+                else self.stamp_preview_surface_color
+            )
+            preview_fill = QtGui.QColor(preview_color)
+            preview_fill.setAlpha(self.stamp_preview_fill_alpha)
+            pen = QtGui.QPen(preview_color, max(1.0, 2.0 / max(self.scale, 1e-6)))
+            p.setPen(pen)
+            p.setBrush(QtGui.QBrush(preview_fill))
+            radius = float(self.stamp_radius_px)
+            center = self.prevMovePoint
+            p.drawEllipse(
+                QtCore.QPointF(center.x(), center.y()),
+                radius,
+                radius,
+            )
+            p.restore()
 
         Shape.scale = self.scale
         for shape in self.gpslabels:

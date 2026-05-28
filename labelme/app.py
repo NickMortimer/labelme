@@ -221,16 +221,8 @@ class MainWindow(QtWidgets.QMainWindow):
             crosshair=self._config["canvas"]["crosshair"],
         )
         stamp_mode_cfg = self._config.get("stamp_mode") or {}
-        stamp_labels_cfg = stamp_mode_cfg.get("labels") or {}
-        self.canvas.stamp_surface_label = stamp_labels_cfg.get(
-            "surface", "turtle_surface"
-        )
-        self.canvas.stamp_deep_label = stamp_labels_cfg.get(
-            "deep", "turtle_deep"
-        )
-        self.canvas.stamp_radius_px = float(
-            stamp_mode_cfg.get("radius_px", 10)
-        )
+        self.canvas.setStampConfig(stamp_mode_cfg)
+        self._syncStampLabelColors()
         self.canvas.letterbox_enabled = False
         self.canvas.letterbox_aspect_ratio = None
         self.canvas.fov_context_px = self.FOV_OVERLAP_PX
@@ -253,6 +245,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.canvas.drawingPolygon.connect(self.toggleDrawingSensitive)
 
         self.setCentralWidget(scrollArea)
+
+        # Capture modifier key transitions even when canvas does not own focus.
+        QtWidgets.QApplication.instance().installEventFilter(self)
 
         features = QtWidgets.QDockWidget.DockWidgetFeatures()
         for dock in ["flag_dock", "label_dock", "shape_dock", "file_dock"]:
@@ -1158,10 +1153,21 @@ class MainWindow(QtWidgets.QMainWindow):
     def setEditMode(self):
         self.toggleDrawMode(True)
 
+    def _syncStampLabelColors(self):
+        """Push the actual label colors for the two stamp labels onto the canvas
+        so the preview ring and cursor match the annotated shapes."""
+        r, g, b = self._get_rgb_by_label(self.canvas.stamp_surface_label)
+        self.canvas.stamp_preview_surface_color = QtGui.QColor(r, g, b, 220)
+        r, g, b = self._get_rgb_by_label(self.canvas.stamp_deep_label)
+        self.canvas.stamp_preview_deep_color = QtGui.QColor(r, g, b, 220)
+        self.canvas._stamp_cursor_cache = {}  # invalidate cached cursors
+
     def toggleStampMode(self, enabled):
         self.canvas.stamp_mode = bool(enabled)
         if enabled:
             self.toggleDrawMode(False, createMode="circle")
+            self._syncStampLabelColors()
+        self.canvas.refreshStampVisuals()
         self.status(
             self.tr("Stamp mode {}.").format(
                 self.tr("enabled") if enabled else self.tr("disabled")
@@ -2164,7 +2170,20 @@ class MainWindow(QtWidgets.QMainWindow):
         self._config["store_data"] = enabled
         self.actions.saveWithImageData.setChecked(enabled)
 
+    def eventFilter(self, obj, event):
+        event_type = event.type()
+        if event_type in (QtCore.QEvent.KeyPress, QtCore.QEvent.KeyRelease):
+            if event.key() == QtCore.Qt.Key_Shift and self.canvas.stamp_mode:
+                # Derive shift state from event type to bypass Qt modifier
+                # timing: keyboardModifiers() is stale during the event itself.
+                shift_down = (event_type == QtCore.QEvent.KeyPress)
+                self.canvas.refreshStampVisuals(shift_active=shift_down)
+        return super(MainWindow, self).eventFilter(obj, event)
+
     def closeEvent(self, event):
+        app = QtWidgets.QApplication.instance()
+        if app is not None:
+            app.removeEventFilter(self)
         if not self.mayContinue():
             event.ignore()
         self.settings.setValue(
